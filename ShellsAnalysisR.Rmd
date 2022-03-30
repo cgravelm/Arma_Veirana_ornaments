@@ -1,0 +1,724 @@
+---
+title: "Shells Analysis"
+author: "Claudine Gravel-Miguel and Andrea Zupancich"
+date: "3/25/2022"
+output: html_document
+---
+
+This document performs the analysis discussed in the manuscript. Most of the code is from CGM, but certain sections are from AZ (noted in the code comments).
+
+```{r setup, echo = F, include = F} 
+
+library(tidyverse) # for dataset manipulation
+library(ggpubr)
+
+knitr::opts_chunk$set(warning=F, message=F, echo =F) # Setting up the chunk settings for all chunks
+
+```
+
+```{r import the master dataset}
+
+shells_ds <- read_csv("SI2_dataset.csv")
+
+```
+
+# Glycymeris pendants
+
+### Morphology
+
+For these pendants, we only looked at the dimensions.
+
+```{r Glycymeris dimensions}
+
+# Print the measurements
+shells_ds %>% 
+  filter(Taxon == "Glycymeris") %>% 
+  dplyr::select(PF, Length, Width, Thickness)
+
+```
+
+And the average of the those dimensions.
+
+```{r average dimensions}
+
+shells_ds %>% 
+  filter(Taxon == "Glycymeris") %>% 
+  summarize(mean_Length = round(mean(Length), digits = 2),
+            mean_width = round(mean(Width), digits = 2),
+            mean_thickness = round(mean(Thickness), digits = 2))
+
+```
+
+### Pendant experiments
+
+During the tumbling experiment, CGM measured the length, width, and thickness of each specimen after each tumbling period. 
+
+Here is the average thickness of specimens of different taxa after 2 tumbling periods (Table 2)
+
+```{r pendant tumbling experiment}
+
+tumbled_ds <- read_csv("Tumbling_experiment.csv")
+
+# Focusing only on the measurements after 2 rounds of tumbling, as this is what I have data for
+tumbled_ds %>% 
+  filter(Tumble_n == 2, Species != "Unknown") %>% 
+  group_by(Species) %>% 
+  summarize(mean_thickness = round(mean(Thickness, na.rm = T), digits = 2))
+
+```
+
+# Columbella rustica
+
+### Morphology
+
+Here is a summary of all *Columbella rustica*'s measurements (Table 3).
+
+```{r perform prelim exploration}
+
+rustica <- shells_ds %>% 
+  filter(Taxon == "Columbella rustica") %>% 
+  mutate(Location = factor(Location, 
+                           levels = c("Head","Arm","Abdomen","Feet", "Sediment","Leg","Washed away"), 
+                           ordered = TRUE)) # Leg is one shell found near the long bone that is washing away
+
+# Calculate the min, mean, and max values
+rustica %>% 
+  pivot_longer(cols = c("Length", "Width", "RatioAreaPerf"),
+               names_to = "variable",
+               values_to = "value") %>% 
+  group_by(variable) %>% 
+  filter(!is.na(value)) %>% # ignore NAs
+  summarize(min = round(min(value), digits = 2), 
+            mean = round(mean(value), digits = 2), 
+            max = round(max(value), digits = 2))
+
+```
+
+### Clusters of shells near human remains
+
+The code here takes the geographic coordinates of the ornaments and human remains, calculates the euclidean distance between each specimen, and creates a dataset of the ornaments that were <= 3 cm from a human bone.
+
+```{r import the dataset of humans remains GIS}
+
+library(readxl)
+human_remains <- read_excel("HumanRemainsCoordinates2022.xlsx", sheet = "AllIdentifiedBones") %>% 
+  filter(`GIS labels` != "Unknown" | Nature == "Human") # focus on bones identified as human
+
+```
+
+```{r identify ornaments close to bones}
+
+# create a new dataset that takes only the necessary variables
+human_remains_reformatted <- human_remains %>% 
+  dplyr::select(PF = Description, 
+                Lot = FeatureType,
+                x = Easting_1,
+                y = Northing_1,
+                z = Elevation_1,
+                Taxon = "GIS labels")
+
+# Add the second shots and the middle position (so that long bone have 3 points considered)
+
+human_remains_reformatted <- human_remains_reformatted %>% 
+  rbind(human_remains %>% 
+          dplyr::select(PF = Description, 
+                Lot = FeatureType,
+                x = Easting_2,
+                y = Northing_2,
+                z = Elevation_2,
+                Taxon = "GIS labels")) %>% 
+  rbind(human_remains %>% 
+          dplyr::select(PF = Description, 
+                Lot = FeatureType,
+                x = Easting_midpoint,
+                y = Northing_midpoint,
+                z = Elevation_midpoint,
+                Taxon = "GIS labels"))
+
+rm(human_remains) # clean up unnecessary datasets
+
+# Create a new dataset for the ornaments only
+shells_reformatted <- shells_ds %>% 
+  dplyr::select(PF, Lot, x, y, z, Taxon) %>% 
+  filter(!is.na(x))
+
+# bind the two datasets so they can be compared using "dist"
+both <- human_remains_reformatted %>% 
+  rbind(shells_reformatted)
+
+rm(shells_reformatted)
+
+# Calculating distance between the bones and the shells
+newNames <- str_c(both$Taxon, "_", both$PF)
+d <- as.matrix(dist(both[,3:5]))
+colnames(d) <- newNames
+rownames(d) <- newNames
+
+# Filtering the data
+library(reshape2)
+
+artifact_distances <- melt(d, varnames = c("ID1", "ID2"))
+
+# Filtering the closest artifacts to bones
+artifact_distances <- artifact_distances %>% 
+  mutate(ID1 = as.character(ID1),
+         ID2 = as.character(ID2)) %>% 
+  filter(stringr::str_detect(ID1, "^Columbella")) %>%  # keep only the entries with Columbella in first column
+  filter(!stringr::str_detect(ID2, "^Columbella")) %>% # remove entries where columbellae are close to other columbellae
+  filter(!stringr::str_detect(ID2, "^Glycymeris")) %>%# remove entries where columbellae are close to Glycymeris pendants
+  filter(value <= 0.03, ID1 != ID2) %>% 
+  arrange(ID1, ID2, desc(value)) %>%  # this is so we keep the highest distance between an ornament and its closest bone
+  distinct(ID1, ID2, .keep_all = T) %>% 
+  arrange(ID1)
+
+rm(both, d)
+
+```
+
+The number of Columbella rustica that were within 3cm of bones with a human ID is: `r length(unique(artifact_distances$ID1)) + 3 #to count the 3 still stuck to the skull`.
+
+We used this data, combined with 3D GIS data, to clarify the location of each ornament.
+
+The number of Columbella rustica found in Sediment or washed away is: `r shells_ds %>% filter(Taxon == "Columbella rustica", Location == "Sediment" | Location == "Washed away") %>% count()`
+
+Here is the count of C. rustica found in noticeable arrangements near each body part:
+
+```{r some basic stats}
+
+rustica %>% 
+  filter(Group == "Y") %>% 
+  count(Location)
+
+```
+
+For a total of `r shells_ds %>% filter(Group == "Y", Taxon == "Columbella rustica") %>% count()` shells in arrangements.
+
+Then, we focus only on shells in arrangements near a body part and plot their length, width, and Thickness (measured at the E location of the perforation) (Figure 11).
+
+```{r Comparing size per group, echo=F}
+
+# Focus only on the shells that were in clear association with a body part (not looking at ones in sediment).
+rustica_groups <- rustica %>%
+    filter(Group == "Y") 
+
+library(ggpubr) # for compare_means
+
+plot.size.per.group <- function(ds){
+  
+  ds.long <- ds %>% 
+    tidyr::gather(key="measure", value="value", c("Length", "Width", "Thickness")) %>% 
+    
+    # Set the position and measure as factors so I can put them in order to see if there is a pattern
+    mutate(Location = factor(Location, levels = c("Head","Arm","Abdomen","Feet"),
+                                      ordered = TRUE),
+           measure = factor(measure, levels = c("Length", "Width", "Thickness"),
+                                      ordered = TRUE)) %>% 
+    filter(!is.na(value)) # Remove entries without data
+
+  # Compare the groups to see if they are similar or not.
+  stat.test <- compare_means(value~Location, ds.long, group.by = "measure", p.adjust.methods = "bonferroni")
+  
+  # Keep only the significant differences and define their position
+  stat.test <<- stat.test %>% 
+    filter(p.adj < 0.05) %>% 
+    mutate(y.position = c(0.025)) # But there aren't any significant ones
+
+  # Create a labeller variable for a clean graph
+  variable_labeller <- as_labeller(c(
+    "Length" = "Length (mm)",
+    "Width" = "Width (mm)",
+    "Thickness" = "Thickness (mm)"
+  ))
+
+  # Dodge with width 0.1
+  posn_d <- position_dodge(width = 0.1)
+
+  # Plot the boxplots per variable with the significance of the Wilcoxon test
+  p <- ds.long %>% 
+    ggplot(aes(group=Location, x=Location, y=value, color = Location)) +
+    geom_jitter(width = 0.2) +
+    stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), color ="black") +
+    facet_wrap(~measure, ncol = 3, labeller=variable_labeller, scales = "free_y") +
+    #stat_pvalue_manual(stat.test, label = "p.signif") +
+    xlab("") + ylab("") +
+    theme_classic() +
+    theme(legend.position = "none")
+
+  print(p)
+  
+}
+
+plot.size.per.group(rustica_groups)
+
+```
+
+### Use-wear score
+
+We computed the use-wear score using two methods. 
+
+#### Angle roundedness
+
+The first one used the the VirtualGoniometer plugin in Meshlab on the microCT scans.
+
+With this tool, we took a measurement at 8 points around each perforation, trying to target an angle when present.
+
+```{r angles}
+
+angles <- read_csv("AngleAnalysis/VirtualGoniometer_Measurements.csv")
+
+# Get PF and Lot numbers from mesh name
+angles <- angles %>% 
+  separate('Mesh Name', c("Lot","PF")) %>% 
+  mutate(PF = as.numeric(PF)) %>% 
+  filter(!is.na(PF))
+
+angles_sides <- angles %>% 
+  dplyr::select(c(PF, Lot, Angle, Position)) %>% 
+  pivot_wider(names_from = Position,
+              values_from = Angle)
+
+# writing my function to use inside mutate
+normalize <- function(x) (x-min(x))/(max(x)-min(x))
+
+angles_sides <- angles_sides %>% 
+  mutate(across(N:NE, normalize)) %>% # run the function on the angles to normalize them 
+  rowwise() %>% 
+  mutate(sumScore = sum(c_across(N:NE))) %>% # compute the cum of the normalized values for each shell
+  arrange(desc(sumScore))
+
+```
+
+However, as we used the plug-in, we realized that thickness of the shell may affect the results. The scatterplot presented below show that we were correct in our assumption, so we controlled for thickness by dividing the score by thickness for each shell.
+
+The second graph shows that the controlled score is no longer correlated with Thickness, which is better.
+
+```{r controlling for thickness}
+
+# Is this just related to thickness?
+angles_sides %>%
+  left_join(rustica, by = "PF") %>%
+  ggplot(aes(x=Thickness, y=sumScore)) + 
+  geom_point() +
+  theme_classic() +
+  xlab("\n Shell thickness (mm)") + ylab("Angle roundedness score\n")
+
+# Yes it is. Can we control for Thickness to get actual roundedness?
+controlled_angles <- angles_sides %>% 
+  left_join(rustica, by = "PF") %>% 
+  mutate(controlledScore = sumScore/Thickness) %>% 
+  arrange(desc(controlledScore))
+
+controlled_angles %>%
+  ggplot(aes(x=Thickness, y=controlledScore)) + 
+  geom_point() +
+  theme_classic() +
+  xlab("\n Shell thickness (mm)") + ylab("Controlled roundedness score\n")
+
+```
+
+#### Surface roughness
+
+The second method was done by Dr Zupancich. He extracted 3D areas around the perforation and divided it into 4 quadrants (see manuscript). He then used CloudCompare to calculate roughness in the quadrants, and randomly selected 100 points per quadrant for each shell. 
+
+He then performed some analysis on the dataset to see if roughness varies per part on the shell as well as if some shells show more roughness than others.
+
+```{r code to sample and clean roughness dataset}
+
+# This code was written by AZ to clean the raw dataset and sample 100 entries per perforation part per shell (so 400 points per shell)
+
+# set.seed(123) # for reproducibility
+# 
+# roughness_all <- read_csv("Shell_roughness_all.csv")
+# 
+# roughness_sampled <- roughness_all %>% 
+#   drop_na() %>% 
+#   group_by(PF, perf.area ) %>% 
+#   sample_n(100) %>%
+#   mutate(perf.side =
+#                      case_when(perf.area == "lower left" ~ "Left", 
+#                                perf.area == "upper left" ~ "Left",
+#                                perf.area == "lower right" ~ "Right",
+#                                perf.area == "upper right" ~ "Right"))
+# 
+# write_csv(roughness_sampled, file="Shell_roughness_sample.csv")
+
+```
+
+```{r import the sampled roughness raw data}
+
+roughness_sampled <- read_csv("Shell_roughness_sample.csv")
+
+# link the data with the rustica dataset to get the latest Location for each shell and reformat the perf.area to ordered factors (CGM code)
+
+rustica_locations <- rustica %>% 
+  dplyr::select(PF, Location, Group)
+
+roughness_sampled <- roughness_sampled %>% 
+  left_join(rustica_locations, by = "PF") %>% 
+  mutate(perf.area = factor(perf.area, 
+                            levels = c("upper left", "lower left", "upper right", "lower right"),
+                            labels = c("Upper left", "Lower left", "Upper right", "Lower right"),
+                            ordered = T),
+         perf.side = factor(perf.side, levels = c("Left","Right"), ordered = T))
+
+```
+
+Comparing the scores of the two methods show that they follow a similar pattern, while not exactly the same. 
+
+```{r comparing roughness and angles}
+
+# The first thing to do is to compare the two methods of assessing use-wear
+
+# computing averages per shell
+roughness_avg <- roughness_sampled %>% 
+  group_by(PF) %>% 
+  summarize(mean_roughness = mean(roughness)) %>% 
+  ungroup()
+
+use_wear <- controlled_angles %>% 
+  dplyr::select(c(PF, Location, Group, x, y, z, Length, Width, Thickness, AreaPerf, controlledScore)) %>% 
+  left_join(roughness_avg, by = "PF") %>% 
+  filter(!is.na(mean_roughness)) # keep only the shells where we calculated both
+
+# Plot the relationship between angles and roughness
+use_wear %>% 
+  ggplot(aes(x = controlledScore, y = mean_roughness)) + 
+  geom_point() +
+  ylab("Mean roughness (mm)\n") + xlab("Controlled roundedness") + 
+  geom_smooth(method = "lm") +
+  theme_classic()
+
+# And calculate its significance
+cor.test(use_wear$controlledScore, use_wear$mean_roughness)
+
+```
+
+These results show that there is a fair significant correlation between the two scores, but they have significant differences, so we will use both for future tests, as they may capture different aspects of use-wear.
+
+The following boxplot shows the differences in roughness around the hole for all shells. **NOTE that all outliers have been omitted here.**
+
+```{r visualizing the roughness vs perforation hole area}
+
+# Compare the groups to see if they are similar or not.
+stat.test <- compare_means(roughness~perf.area, data=roughness_sampled, p.adjust.methods = "bonferroni")
+  
+# Keep only the significant differences and define their position
+stat.test <- stat.test %>% 
+  filter(p.adj < 0.05) %>% 
+  mutate(y.position = c(0.04, 0.045, 0.05, 0.055, 0.06)) 
+
+ggplot(roughness_sampled) + 
+  geom_boxplot(aes(x = perf.area, y = roughness, fill = perf.area), 
+               outlier.shape = NA, alpha = 0.8, notch = TRUE, notchwidth = 0.6) + 
+  coord_cartesian(ylim = c(0, 0.06)) +
+  stat_pvalue_manual(stat.test, label = "p.signif") +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  xlab("\nArea around the perforation") + ylab("Roughness (mm)\n")
+
+```
+
+We performed Pairwise Wilcox test comparisons on Roughness vs perforation area.
+
+```{r pairwise Wilcox on roughness vs perforation area}
+
+#AZ code
+pairwise.wilcox.test(roughness_sampled$roughness, roughness_sampled$perf.area, p.adjust.method = "bonferroni")
+
+```
+
+And a Kruskall-Wallis rank sum test comparing Roughness vs perforation side.
+
+```{r kruskall-wallis roughness vs perforation side}
+
+#AZ code
+kruskal.test(roughness ~ perf.side, data = roughness_sampled)
+
+```
+
+This confirms the patterns shown by the microscope observations.
+
+The graph below also shows a strong pattern where the left side is more worn than the right side.
+
+```{r boxplots roughness vs side of the perforation}
+
+# Compare the groups to see if they are similar or not.
+stat.test <- compare_means(roughness~perf.side, data=roughness_sampled, p.adjust.methods = "bonferroni")
+  
+# Keep only the significant differences and define their position
+stat.test <- stat.test %>% 
+  filter(p.adj < 0.05) %>% 
+  mutate(y.position = c(0.04)) 
+
+ggplot(roughness_sampled) + 
+  geom_boxplot(aes(x = perf.side, y = roughness, fill = perf.side), 
+               outlier.shape = NA, alpha = 0.8, notch = TRUE, notchwidth = 0.6) + 
+  coord_cartesian(ylim = c(0, 0.04)) +
+  stat_pvalue_manual(stat.test, label = "p.signif") +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  xlab("\nSide of the perforation") + ylab("Roughness (mm)\n")
+
+```
+
+The following boxplot shows the differences in roughness and roundedness for shells divided by body region. This focuses only on the shells that were in in-situ arrangements. **NOTE that all outliers have been omitted here.**
+
+```{r Boxplot of roughness vs body position}
+
+# Compare the groups to see if they are similar or not.
+# Focusing only on the shells within arrangements
+
+roughness_sampled_arr <- roughness_sampled %>% 
+  filter(Group == "Y")
+
+stat.test <- compare_means(roughness~Location, data=roughness_sampled_arr, p.adjust.methods = "bonferroni")
+  
+# Keep only the significant differences and define their position
+stat.test <- stat.test %>% 
+  filter(p.adj < 0.05) %>% 
+  mutate(y.position = c(0.041, 0.055, 0.06, 
+                        0.042, 0.047,
+                        0.052)) 
+
+ggplot(roughness_sampled_arr) + 
+  geom_boxplot(aes(x = Location, y = roughness, fill = Location), 
+               outlier.shape = NA, alpha = 0.8, notch = TRUE, notchwidth = 0.6) + 
+  coord_cartesian(ylim = c(0, 0.06)) +
+  stat_pvalue_manual(stat.test, label = "p.signif") +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  xlab("\nLocation on the body") + ylab("Roughness (mm)\n")
+
+```
+
+```{r Boxplot of roundedness vs body position}
+
+# Compare the groups to see if they are similar or not.
+# Focusing only on the shells within arrangements
+
+use_wear_arr <- use_wear %>% 
+  filter(Group == "Y")
+
+stat.test <- compare_means(controlledScore~Location, data=use_wear_arr, p.adjust.methods = "bonferroni")
+  
+# Keep only the significant differences and define their position
+stat.test <- stat.test %>% 
+  filter(p.adj < 0.05) %>% 
+  mutate(y.position = c(16)) 
+
+ggplot(use_wear_arr) + 
+  geom_boxplot(aes(x = Location, y = controlledScore, fill = Location), 
+               outlier.shape = NA, alpha = 0.8, notch = TRUE, notchwidth = 0.6) + 
+  coord_cartesian(ylim = c(0, 16)) +
+  stat_pvalue_manual(stat.test, label = "p.signif") +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  xlab("\nLocation on the body") + ylab("Controlled angle roundedness\n")
+
+```
+
+In the text, these results are summarized in a table rather than figure.
+
+```{r pairwise wilcox tests on roughness and location on the body}
+
+#AZ code (modified by CGM to consider the means rather than the sampled data to be a better comparison with the angle data)
+pairwise.wilcox.test(use_wear_arr$mean_roughness, use_wear_arr$Location, p.adjust.method = "bonferroni")
+
+```
+
+```{r pairwise wilcox tests on summed angles and location on the body}
+
+#AZ code
+pairwise.wilcox.test(use_wear_arr$controlledScore, use_wear_arr$Location, p.adjust.method = "bonferroni")
+
+```
+
+However, does it mean that all worn shells are just around the head? In the figure below, we plot the mean roughness of shells against their geographical coordinates to show if there is any pattern.
+
+```{r plotting the scores geographically}
+
+use_wear %>% 
+  ggplot() +
+  geom_point(aes(x=x, y=y, color = mean_roughness, shape = Location), size = 2) +
+  scale_color_distiller(palette = "YlGnBu") +
+  coord_cartesian() +
+  theme_classic() +
+  xlab("Longitude") + ylab("Latitude")
+
+```
+
+So, we do see some differences within arrangements as well.
+
+# Statistical test for significant differences
+
+## Correlation between sizes and use wear scores
+
+First looking at correlation with length
+
+```{r calculate correlation between use wear and length}
+
+# Is mean roughness correlated with Length?
+cor.test(use_wear$Length, use_wear$mean_roughness)
+
+use_wear %>% 
+  ggplot(aes(x = Length, y = mean_roughness)) + 
+  geom_point() +
+  ylab("Average roughness (mm)\n") + xlab("Length") + 
+  geom_smooth(method = "lm") +
+  theme_classic()
+
+# What about the controlled scores?
+cor.test(use_wear$Length, use_wear$controlledScore)
+
+use_wear %>% 
+  ggplot(aes(x = Length, y = controlledScore)) + 
+  geom_point() +
+  ylab("Controlled summed angles\n") + xlab("Length") + 
+  geom_smooth(method = "lm") +
+  theme_classic()
+
+``` 
+
+The correlation is not statistically significant for either use-wear score.
+
+What about perforation area?
+
+```{r calculate correlation between use wear and perforation area}
+
+# Is mean roughness correlated with Length?
+cor.test(use_wear$AreaPerf, use_wear$mean_roughness)
+
+use_wear %>% 
+  ggplot(aes(x = AreaPerf, y = mean_roughness)) + 
+  geom_point() +
+  ylab("Average roughness (mm)\n") + xlab("Perforation area (mm2)") + 
+  geom_smooth(method = "lm") +
+  theme_classic()
+
+# What about the controlled scores?
+cor.test(use_wear$AreaPerf, use_wear$controlledScore)
+
+use_wear %>% 
+  ggplot(aes(x = AreaPerf, y = controlledScore)) + 
+  geom_point() +
+  ylab("Controlled summed angles\n") + xlab("Perforation area (mm2)") + 
+  geom_smooth(method = "lm") +
+  theme_classic()
+
+``` 
+
+Both use-wear scores correlate significantly and relatively fairly with the size of the perforation. This suggests that perforation size might be an indicator of wear.
+
+```{r calculate correlation between mean roughness and thickness}
+
+# Is mean roughness correlated with thickness?
+cor.test(use_wear$Thickness, use_wear$mean_roughness)
+
+use_wear %>% 
+  ggplot(aes(x = Thickness, y = mean_roughness)) + 
+  geom_point() +
+  ylab("Roughness (mm)\n") + xlab("Thickness") + 
+  geom_smooth(method = "lm") +
+  theme_classic()
+
+```
+Interestingly, the roughness values also correlate with thickness. This is interesting. We need to investigate it further in the future.
+
+### Slope and orientation
+
+Looking at the slope and orientation of the shells in each group.
+
+```{r rose plots per group, echo=F, message=F, warning=F}
+
+rose.plot.facets <- function(ds){
+  
+  ds$bin.slope <- cut(x = ds$Slope,
+                              breaks = c(-1,15,30,45,60,75,90),
+                              labels = c("0-15","15-30","30-45","45-60","60-75","75-90"),
+                              ordered_result = TRUE)
+
+  ds$bin.or <- cut(x = ds$Orientation,
+                              breaks = c(-1,15,45,75,105,135,165,195,225,255,285,315,345,360),
+                              labels = c("N","NNE","NEE","E","SEE","SSE","S","SSW","SWW","W","NWW","NNW","N"),
+                              ordered_result = TRUE)
+
+
+  p <- ggplot(data = ds, aes(x = bin.or, fill = fct_rev(bin.slope))) +
+    geom_bar() + 
+    scale_x_discrete(drop = FALSE, labels = waiver()) +
+    facet_grid(cols = vars(Location)) +
+    coord_polar(start = -((30/2)/360) * 2*pi) +
+    scale_fill_brewer(palette = "PuBu") +
+    guides(fill=guide_legend(title="Slope")) +
+    theme_classic() +
+    theme(axis.title.x = element_blank()) 
+  
+  print(p)
+  
+}
+
+library(viridis)
+library(RColorBrewer)
+
+rustica_groups %>% 
+  filter(!is.na(Slope)) %>% 
+  rose.plot.facets()
+
+```
+
+# Supplementary Information
+
+The following table shows summary statistics of roughness per sample and per region around the perforation.
+These lines of code were written by AZ.
+
+```{r summary stats of roghness per perforation location per sample}
+
+# Creating a function that returns the summary to avoid copying the same multiple lines of code over and over
+summary_stats <- function(ds){
+  ds %>% 
+    summarise(
+      max_roughness = max(roughness),
+      min_roughness = min(roughness),
+      mean_roughness = mean(roughness),
+      stD_roughness = sd(roughness)
+    )
+}
+
+roughness_sampled %>% 
+  group_by(PF, perf.area) %>% 
+  summary_stats()
+
+```
+
+Summary statistics of roughness per perforation hole quadrant
+
+```{r summary stats of roghness per perforation location}
+
+roughness_sampled %>% 
+  group_by(perf.area) %>% 
+  summary_stats()
+
+```
+
+Summary statistics of roughness per perforation hole side
+
+```{r summary stats of roughness per perforation hole side}
+
+roughness_sampled %>% 
+  group_by(perf.side) %>% 
+  summary_stats()
+
+```
+
+Summary statistics of roughness on shells located over the body
+
+```{r summary stats of roughness per location on the body}
+
+roughness_sampled %>% 
+  filter(Group == "Y") %>% 
+  group_by(Location) %>% 
+  summary_stats()
+
+```
+
+# The end
